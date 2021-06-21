@@ -1,0 +1,62 @@
+#!/usr/bin/env lua
+
+--
+-- 2mbox
+-- converts message/rfc822 to application/mbox
+-- rfc4155 The application/mbox Media Type
+
+--[[
+
+find -L mbox/fossil -type f -name '*.eml' | sort | 2mbox | xz -9e > fossil.mbox.xz
+
+]]--
+
+local assert = assert
+local io = require( 'io' )
+local print = print
+local tostring = tostring
+
+_ENV = nil
+
+local function QUOTE( anArgument )
+  return ( "'%s'" ):format( tostring( anArgument or '' ):gsub( "'", "'\\''" ) )
+end
+
+local function ADDRESS( aPath )
+  local aCommand = ( "822field 'From' < %s | addrlist | grep '^address '" ):format( QUOTE( aPath ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aValue = assert( aHandle:read() )
+
+  assert( aHandle:close() )
+  aValue = aValue:match( '{(.-)}$' )
+  aValue = aValue:gsub( '[%s%c]', '-' )
+
+  return assert( aValue )
+end
+
+local function TIMESTAMP( aPath )
+  local aCommand = ( "822field 'Date' < %s | 822date | tail -n 1" ):format( QUOTE( aPath ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aValue = assert( aHandle:read() )
+
+  assert( aHandle:close() )
+
+  return assert( aValue )
+end
+
+for aPath in io.stdin:lines() do
+  local anAddress = ADDRESS( aPath )
+  local aTimestamp = TIMESTAMP( aPath )
+  local aSeparator = ( 'From %s %s' ):format( anAddress, aTimestamp )
+  local aFile = assert( io.open( aPath, 'r' ) )
+
+  print( aSeparator )
+
+  for aLine in aFile:lines() do
+    print( aLine )
+  end
+
+  print()
+
+  assert( aFile:close() )
+end

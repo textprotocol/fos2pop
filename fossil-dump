@@ -1,0 +1,20 @@
+#!/bin/sh
+
+fossil sql <<EOD
+.bail on
+.headers off
+.mode tabs
+
+select    '@ ' || blob.uuid || char( 10 ) || content( blob.uuid ) as content
+from      event
+
+join      blob
+on        blob.rid = event.objid
+
+where     event.mtime between coalesce( julianday( '$1' ), 0 ) and coalesce( julianday( '$2' ), 5373484.49999999 )  -- 9999-12-31T23:59:59.999
+
+order by  event.mtime,
+          event.objid;
+
+.exit
+EOD

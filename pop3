@@ -1,0 +1,437 @@
+#!/usr/bin/env lua
+
+-- pop3
+-- ucspi-tcp Post Office Protocol (POP3) server
+
+--[[
+
+tcpserver -v -c42 -o -D -H -P -l 0 -R 127.0.0.1 1110 ./pop3 mbox
+
+{
+  echo 'capa'
+  echo 'user fossil'
+  echo 'pass 10'
+  echo 'stat'
+  echo 'list'
+  echo 'uidl'
+  echo 'top 10 0'
+} | nc pop.textprotocol.org 1110
+
+nohup tcpserver -v -c42 -o -D -H -P -l 0 -R 64.225.108.16 1110 timeout 5m ~/pop3/bin/pop3 ~/pop3/var/mbox > ~/pop3/var/log/pop3.log &
+
+]]--
+
+local arg = arg
+local assert = assert
+local collectgarbage = collectgarbage
+local coroutine = require( 'coroutine' )
+local io = require( 'io' )
+local math = require( 'math' )
+local os = require( 'os' )
+local pcall = pcall
+local print = print
+local select = select
+local table = require( 'table' )
+local tonumber = tonumber
+local tostring = tostring
+
+_ENV = nil
+
+local _path = nil
+
+local function PATH()
+  _path = assert( _path or  arg[ 1 ] )
+
+  return _path
+end
+
+local _maildrop = nil
+
+local function MAILDROP( aMaildrop )
+  if aMaildrop then
+    assert( 0 ~= aMaildrop:len() )
+    assert( 16 >= aMaildrop:len() )
+    assert( aMaildrop == aMaildrop:match( '^(%l+)$' ) )
+    assert( os.execute( ( 'test -d %s/%s' ):format( PATH(), aMaildrop ) ) )
+    _maildrop = aMaildrop
+  end
+
+  return _maildrop
+end
+
+local _limit = nil
+
+local function  LIMIT( aLimit )
+  if aLimit then
+    _limit = tonumber( aLimit ) or 200
+    _limit = math.abs( _limit )
+    _limit = math.floor( _limit )
+  end
+
+  return ( _limit or 200 )
+end
+
+local function DIRECTORY()
+  return ( '%s/%s' ):format( assert( PATH() ), assert( MAILDROP() ) )
+end
+
+local _tmpfile = nil
+
+local function TMPFILE()
+  _tmpfile = assert( _tmpfile or io.tmpfile() )
+
+  return _tmpfile
+end
+
+local function QUOTE( anArgument )
+  return ( "'%s'" ):format( tostring( anArgument or '' ):gsub( "'", "'\\''" ) )
+end
+
+local function LIMITCLAUSE()
+  local aLimit = LIMIT()
+
+  if 0 == aLimit then return '' end
+
+  return ( '| tail -n %d' ):format( aLimit )
+end
+
+local function BUILDTOC()
+  local aCommand =
+        ( "find -L %s -type f -name '*.eml' -printf '%%p\\t%%s\\n' 2>/dev/null | sort %s" ):format
+        ( QUOTE( DIRECTORY() ), LIMITCLAUSE() )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aFile = TMPFILE()
+  local aList = {}
+  local anIndex = 0
+  local aSum = 0
+
+  for aLine in aHandle:lines() do
+    local aName, aSize = aLine:match( '^(%C+)\t(%C+)$' )
+          aName = assert( aName:match( '/([%w.]+)%.eml$' ) )
+          aSize = assert( tonumber( aSize ) )
+    local aDescription = ( '%s\t%d\n' ):format( aName, aSize )
+
+    aSum = aSum + aSize
+    anIndex = anIndex + 1
+    aList[ anIndex ] = aFile:seek()
+
+    aFile:write( aDescription )
+  end
+
+  assert( aFile:flush() )
+  assert( aHandle:close() )
+
+  return aList, anIndex, aSum
+end
+
+local _toc = nil
+local _count = nil
+local _size = nil
+
+local function TOC()
+  if _toc == nil then _toc, _count, _size = BUILDTOC() end
+
+  return assert( _toc ), assert( _count ), assert( _size )
+end
+
+local function ITEM( anIndex )
+  local anOffset = assert( TOC()[ assert( anIndex ) ] )
+  local aFile = TMPFILE()
+        assert( aFile:seek( 'set', anOffset ) )
+  local aLine = assert( aFile:read() )
+  local aName, aSize = aLine:match( '^(%C+)\t(%C+)$' )
+
+  return assert( aName ), assert( tonumber( aSize ) )
+end
+
+local function ITEMS()
+  assert( TOC() )
+  local aFile = TMPFILE()
+  local anIndex = 0
+
+  assert( aFile:seek( 'set' ) )
+
+  return coroutine.wrap
+  (
+    function()
+      for aLine in aFile:lines() do
+        local aName, aSize = aLine:match( '^(%C+)\t(%C+)$' )
+
+        anIndex = anIndex + 1
+
+        coroutine.yield( anIndex, assert( aName ), assert( tonumber( aSize ) ) )
+      end
+    end
+  )
+end
+
+local function CONTENT( anIndex, aLimit )
+  local aName = assert( ITEM( anIndex ) )
+  local aFileName = ( '%s/%s.eml' ):format( DIRECTORY(), aName )
+  local aFile = assert( io.open( aFileName, 'r' ) )
+  local aLimit = aLimit or math.maxinteger
+  local anIndex = 0
+  local isHeader = true
+
+  return coroutine.wrap
+  (
+    function()
+      for aLine in aFile:lines() do
+        if isHeader then coroutine.yield( aLine )
+        elseif anIndex <= aLimit then coroutine.yield( aLine )
+        else break end
+
+        if isHeader and '' == aLine then isHeader = false end
+        if not isHeader then anIndex = anIndex + 1 end
+      end
+
+      assert( aFile:close() )
+    end
+  )
+end
+
+local function INIT( aMaildrop, aLimit )
+  _maildrop = nil
+  _limit = nil
+  _tmpfile = nil
+  _toc = nil
+  _count = nil
+  _size = nil
+
+  MAILDROP( aMaildrop )
+  LIMIT( aLimit )
+end
+
+--
+-- RFC1939 Post Office Protocol - Version 3
+-- RFC2449 POP3 Extension Mechanism
+--
+
+local OK = '+OK'
+local ERR = '-ERR'
+local DOT = '.'
+local SP = ' '
+local EOL = '\r\n'
+
+local _log = nil
+
+local function LOG( aLog )
+  _log = aLog or _log or {}
+
+  return assert( _log )
+end
+
+local function PRINTLOG()
+  local aBuffer = {}
+
+  aBuffer[ #aBuffer + 1 ] = os.getenv( 'TCPREMOTEHOST' ) or os.getenv( 'TCPREMOTEIP' ) or '-' -- remotehost
+  aBuffer[ #aBuffer + 1 ] = os.getenv( 'TCPREMOTEINFO' ) or '-' -- rfc931
+  aBuffer[ #aBuffer + 1 ] = MAILDROP() or '-' -- authuser
+  aBuffer[ #aBuffer + 1 ] = ( '[%s]' ):format( os.date( '!%Y-%m-%dT%TZ' ) ) -- [date]
+  aBuffer[ #aBuffer + 1 ] = ( '%q' ):format( LOG()[ 'request' ] or '' ) -- "request"
+  aBuffer[ #aBuffer + 1 ] = tostring( LOG()[ 'status' ] or '-' ) -- status
+  aBuffer[ #aBuffer + 1 ] = tostring( LOG()[ 'size' ] or 0 ) -- bytes
+
+  io.stderr:write( table.concat( aBuffer, ' ' ), '\n' )
+end
+
+
+local function PRINT( ... )
+  local aBuffer = {}
+
+  for anIndex = 1, select( '#', ... ) do
+    aBuffer[ #aBuffer + 1 ] = assert( tostring( assert( select( anIndex, ... ) ) ) )
+  end
+
+  local aLine = table.concat( aBuffer, SP )
+
+  LOG()[ 'size' ] = ( LOG()[ 'size' ] or 0 ) + aLine:len() + EOL:len()
+
+  if not io.stdout:write( aLine, EOL ) then os.exit( false ) end
+  if not io.stdout:flush() then os.exit( false ) end
+end
+
+local function PRINTOK( ... )
+  LOG()[ 'status' ] = OK
+  PRINT( OK, ... )
+end
+
+local function PRINTERR( ... )
+  LOG()[ 'status' ] = ERR
+  PRINT( ERR, ... )
+end
+
+local function PRINTDOT()
+  PRINT( DOT )
+end
+
+local function CAPA()
+  PRINTOK()
+
+  PRINT( 'EXPIRE NEVER' )
+  PRINT( 'LOGIN-DELAY 900' )
+  PRINT( 'PIPELINING' )
+  PRINT( 'TOP' )
+  PRINT( 'UIDL' )
+  PRINT( 'USER' )
+
+  PRINTDOT()
+end
+
+local function USER( aName )
+  INIT( assert( aName ) )
+
+  PRINTOK()
+end
+
+local function PASS( aPassword )
+  INIT( assert( MAILDROP() ), assert( aPassword ) )
+
+  PRINTOK()
+end
+
+local function QUIT()
+  PRINTOK()
+
+  os.exit( true )
+end
+
+local function STAT()
+  local aTOC, aCount, aSize = TOC()
+
+  PRINTOK( aCount, aSize )
+end
+
+local function LISTALL()
+  PRINTOK()
+
+  for aNumber, aName, aSize in ITEMS() do
+    PRINT( aNumber, aSize )
+  end
+
+  PRINTDOT()
+end
+
+local function LIST( aNumber )
+  if not aNumber then return LISTALL() end
+  local aNumber = assert( tonumber( aNumber ) )
+  local aName, aSize = ITEM( aNumber )
+
+  PRINTOK( aNumber, aSize )
+end
+
+local function STUFF( aLine )
+  if aLine:byte() == 46 then -- dot
+    aLine = ( '.%s' ):format( aLine )
+  end
+
+  return aLine
+end
+
+local function RETR( aNumber )
+  local aNumber = assert( tonumber( aNumber ) )
+
+  PRINTOK()
+
+  for aLine in CONTENT( aNumber ) do
+    PRINT( STUFF( aLine ) )
+  end
+
+  PRINTDOT()
+end
+
+local function DELE( aNumber )
+  PRINTERR()
+end
+
+local function NOOP()
+  PRINTOK()
+end
+
+local function RSET()
+  PRINTOK()
+end
+
+local function TOP( aNumber, aLimit )
+  local aNumber = assert( tonumber( aNumber ) )
+  local aLimit = assert( tonumber( aLimit ) )
+
+  PRINTOK()
+
+  for aLine in CONTENT( aNumber, aLimit ) do
+    PRINT( STUFF( aLine ) )
+  end
+
+  PRINTDOT()
+end
+
+local function UIDLALL()
+  PRINTOK()
+
+  for aNumber, aName, aSize in ITEMS() do
+    local aName = aName:gsub( '%W', '' )
+
+    PRINT( aNumber, aName )
+  end
+
+  PRINTDOT()
+end
+
+local function UIDL( aNumber )
+  if not aNumber then return UIDLALL() end
+  local aNumber = assert( tonumber( aNumber ) )
+  local aName, aSize = ITEM( aNumber )
+
+  aName = aName:gsub( '%W', '' )
+
+  PRINTOK( aNumber, aName )
+end
+
+local _commands =
+{
+  CAPA = CAPA,
+  DELE = DELE,
+  LIST = LIST,
+  NOOP = NOOP,
+  PASS = PASS,
+  QUIT = QUIT,
+  RETR = RETR,
+  RSET = RSET,
+  STAT = STAT,
+  TOP = TOP,
+  UIDL = UIDL,
+  USER = USER
+}
+
+local function HANDLE()
+  local aLine = io.stdin:read()
+        if not aLine or 0 == aLine:len() then os.exit( false ) end
+        aLine = aLine:match( '^(%C+)' )
+        if not aLine or 0 == aLine:len() then os.exit( false ) end
+        aLine = aLine:sub( 1, 20 )
+        LOG()[ 'request' ] = aLine
+  local aList = {}
+        aLine:gsub( '(%S+)', function( aValue ) aList[ #aList + 1 ] = aValue end )
+  local aName = assert( aList[ 1 ] ):upper()
+        table.remove( aList, 1 )
+  local aCommand = assert( _commands[ aName ] )
+
+  aCommand( table.unpack( aList ) )
+
+  return true
+end
+
+local function MAIN()
+  PRINTOK()
+
+  while true do
+    LOG( {} )
+    if not pcall( HANDLE ) then PRINTERR() end
+    PRINTLOG()
+    collectgarbage()
+  end
+end
+
+MAIN()
+
+

@@ -1,0 +1,633 @@
+#!/usr/bin/env lua
+
+--
+-- art2eml
+-- converts fossil forum artifact to message/rfc822
+--
+-- fossil configuration pull interwiki
+--
+
+local arg = arg
+local assert = assert
+local io = require( 'io' )
+local ipairs = ipairs
+local os = require( 'os' )
+local pairs = pairs
+local print = print
+local table = require( 'table' )
+local tonumber = tonumber
+local tostring = tostring
+
+_ENV = nil
+
+local HASHDIGITS = 32
+
+local function QUOTE( anArgument )
+  return ( "'%s'" ):format( tostring( anArgument or '' ):gsub( "'", "'\\''" ) )
+end
+
+local function GETCONFIG( aName )
+  local aCommand =
+[[
+fossil sql <<'EOF' 2>/dev/null
+.bail on
+.headers off
+.mode tabs
+
+select  config.value as value
+from    config
+
+where   config.name = '%s'
+
+limit   1;
+
+.exit
+EOF
+]]
+        aCommand = aCommand:format( assert( aName ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aValue = aHandle:read()
+        assert( aHandle:close() )
+
+  return aValue
+end
+
+local _config = {}
+
+local function CONFIG( aName )
+  if nil == _config[ assert( aName ) ] then _config[ aName ] = GETCONFIG( aName ) or false end
+  if false == _config[ aName ] then return nil end
+
+  return _config[ aName ]
+end
+
+local function GETID( anID )
+  if 64 == anID:len() then return anID end
+
+  local aCommand = ( 'fossil whatis %s 2>/dev/null | grep "^artifact:"' ):format( QUOTE( assert( anID ) ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local anID = assert( aHandle:read() ):match( '(%S+)$' )
+        assert( aHandle:close() )
+
+  return anID
+end
+
+local _id = nil
+
+local function ID()
+  _id = _id or GETID( assert( arg[ 1 ] ) )
+
+  return assert( _id )
+end
+
+local function GETARTIFACT( anID )
+  local aCommand = ( 'fossil artifact %s 2>/dev/null' ):format( QUOTE( assert( anID ) ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aMap = {}
+
+  for aLine in aHandle:lines() do
+    local aType, aValue = aLine:match( '^(%u) (.+)$' )
+
+    if 'W' == aType then aValue = assert( aHandle:read( assert( tonumber( aValue ) ) ) ) assert( '' == aHandle:read() ) end
+
+    if aType and aValue then aMap[ aType ] = aValue end
+  end
+
+  assert( aHandle:close() )
+
+  return aMap
+end
+
+local _artifact = nil
+
+local function ARTIFACT()
+  _artifact = _artifact or GETARTIFACT( ID() )
+
+  return assert( _artifact )
+end
+
+local function GETURL()
+  local aCommand = ( 'fossil test-urlparser $(fossil remote-url) 2>/dev/null | grep "^g\\.url\\." | sort | uniq' )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aMap = {}
+
+  for aLine in aHandle:lines() do
+    local aKey, aValue = aLine:match( '^g%.url%.(%S+)%s+=%s+(%S+)$' )
+
+    if aKey and aValue then aMap[ aKey ] = aValue end
+  end
+
+  assert( aHandle:close() )
+
+  return aMap
+end
+
+local _url = nil
+
+local function URL()
+  _url = _url or GETURL()
+
+  return assert( _url )
+end
+
+local function TIMESTAMP( aDate, aTime )
+  local aYear, aMonth, aDay = aDate:match( '^(%d%d%d%d)-(%d%d)-(%d%d)$' )
+  local aMap = { year = tonumber( aYear ), month = tonumber( aMonth ), day = tonumber( aDay ) }
+  local aDescription = ( '%s %s -0000' ):format( os.date( '%a, %d %b %Y', os.time( aMap ) ), aTime )
+
+  return aDescription
+end
+
+local function RECEIVED()
+  local aCommand = ( 'fossil whatis --verbose %s 2>/dev/null | grep "^received:"' ):format( QUOTE( ID() ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aLine = assert( aHandle:read() )
+        assert( aHandle:close() )
+  local aDate, aTime, anAddress = aLine:match( '([%d-]+) ([%d:]+) from ([%d.]+)$' )
+  local aTimestamp = TIMESTAMP( aDate, aTime )
+  local aHostname = URL()[ 'hostname' ]
+  local aDescription = ( 'from %s (%s) with fossil; %s' ):format( aHostname, anAddress, aTimestamp )
+
+  return aDescription
+end
+
+local function DATE()
+  local aDate = ARTIFACT()[ 'D' ]
+  local aDate, aTime = aDate:match( '^([%d-]+)T([%d:]+)' )
+
+  return TIMESTAMP( aDate, aTime )
+end
+
+local function MAILHOST()
+  return URL()[ 'hostname' ]
+end
+
+local function MAILBOX( aName )
+  local aCommand = ( 'fossil test-mailbox-hashname %s 2>/dev/null' ):format( QUOTE( aName ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aLine = assert( aHandle:read() )
+        assert( aHandle:close() )
+  local aMailbox = aLine:match( '(%S+)$' )
+
+  return aMailbox
+end
+
+local function ENCODEADDRESS( aValue )
+  local aCommand = ( 'reformime -c "utf-8" -O %s 2>/dev/null' ):format( QUOTE( aValue ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aValue = assert( aHandle:read() )
+        assert( aHandle:close() )
+
+  return aValue
+end
+
+local function ENCODEWORD( aValue )
+  local aCommand = ( 'reformime -c "utf-8" -o %s 2>/dev/null' ):format( QUOTE( aValue ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aValue = assert( aHandle:read() )
+        assert( aHandle:close() )
+
+  return aValue
+end
+
+local function FROM()
+  local aName = ARTIFACT()[ 'U' ]
+  local aMailbox = MAILBOX( aName )
+  local aMailhost = MAILHOST()
+  local aDescription = ( '%q <%s@%s>' ):format( aName , aMailbox, aMailhost )
+
+  return ENCODEADDRESS( aDescription )
+end
+
+local function TO()
+  local aName = CONFIG( 'project-name' ) or 'Forum'
+  local aMailbox = CONFIG( 'short-project-name' ) or 'forum'
+  local aMailhost = MAILHOST()
+  local aDescription = ( '%q <%s@%s>' ):format( aName, aMailbox, aMailhost )
+
+  return ENCODEADDRESS( aDescription )
+end
+
+local function MESSAGEID( anID )
+  local anID = assert( anID ):sub( 1, HASHDIGITS )
+  local aMailhost = MAILHOST()
+  local aDescription = ( '<%s@%s>' ):format( anID, aMailhost )
+
+  return aDescription
+end
+
+local function INREPLYTO()
+  local anID = ARTIFACT()[ 'P' ] or ARTIFACT()[ 'I' ]
+
+  if anID then return MESSAGEID( anID ) end
+end
+
+local function REFERENCES()
+  local anArtifact = ARTIFACT()
+  local aRoot = anArtifact[ 'G' ]
+  local anID = anArtifact[ 'P' ] or anArtifact[ 'I' ]
+  local someIDs = {}
+
+  while anID do
+    someIDs[ #someIDs + 1 ] = anID
+    anArtifact = GETARTIFACT( anID )
+    anID = anArtifact[ 'I' ]
+  end
+
+  if 0 == #someIDs then return nil end
+
+  if aRoot and aRoot ~= someIDs[ #someIDs ] then
+    someIDs[ #someIDs + 1 ] = aRoot
+  end
+
+  local aBuffer = {}
+
+  for anIndex = #someIDs, 1, -1 do
+    aBuffer[ #aBuffer + 1 ] = MESSAGEID( someIDs[ anIndex ] )
+  end
+
+  return table.concat( aBuffer, '\n ' )
+end
+
+local function SUBJECT()
+  local anArtifact = ARTIFACT()
+  local aSubject = anArtifact[ 'H' ]
+
+  if not aSubject and anArtifact[ 'G' ] then
+    aSubject = GETARTIFACT( anArtifact[ 'G' ] )[ 'H' ]
+  end
+
+  aSubject = aSubject or '(no subject)'
+  aSubject = aSubject:gsub( '\\s', ' ' )
+
+  if anArtifact[ 'I' ] then aSubject = ( 'Re: %s' ):format( aSubject ) end
+  if anArtifact[ 'P' ] then aSubject = ( '%s [edit]' ):format( aSubject ) end
+
+  return ENCODEWORD( aSubject )
+end
+
+local function ARCHIVEDAT()
+  local anURL = URL()[ 'canonical' ]
+  local anID = ID():sub( 1, HASHDIGITS )
+  local aDescription = ( '<%s/forumpost/%s>' ):format( anURL, anID )
+
+  return aDescription
+end
+
+local function LISTARCHIVE()
+  return ( '<%s>' ):format( URL()[ 'canonical' ] )
+end
+
+local function LISTID()
+  local aName = CONFIG( 'project-description' ) or 'Forum'
+  local aMailbox = CONFIG( 'short-project-name' ) or 'forum'
+  local aMailhost = MAILHOST()
+  local aDescription = ( '%q <%s@%s>' ):format( aName, aMailbox, aMailhost )
+
+  return ENCODEADDRESS( aDescription )
+end
+
+local function CONTENT()
+  local anArtifact = ARTIFACT()
+  local aContent = anArtifact[ 'W' ]
+  local aContentType = ( anArtifact[ 'N' ] or 'text/x-fossil-wiki' ):lower()
+
+  return aContent, aContentType
+end
+
+local function TMPDIR()
+  local aCommand = 'mktemp -d -q 2>/dev/null'
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aDirectory = assert( aHandle:read() )
+
+  assert( aHandle:close() )
+
+  return assert( aDirectory )
+end
+
+local _directory = nil
+
+local function TMPNAME( aName, anExtension )
+  _directory = assert( _directory or TMPDIR() )
+
+  return ( '%s/%s.%s' ):format( _directory, aName, anExtension )
+end
+
+local function WRITECONTENT( aContent )
+  local aName = TMPNAME( 'content', 'txt' )
+  local aFile = assert( io.open( aName, 'wb' ) )
+
+  assert( aFile:write( aContent ) )
+  assert( aFile:close() )
+
+  return aName
+end
+
+local function RENDERPLAIN( aContent, aType )
+  local aName = WRITECONTENT( aContent )
+  local aRenderedName = TMPNAME( 'part', 'html' )
+  local aRenderedFile = io.open( aRenderedName, 'wb' )
+
+  aRenderedFile:write( '<pre style="white-space: pre-wrap; word-wrap: break-word;">\n' )
+  aRenderedFile:write( ( aContent:gsub( '[&<>]', { [ '&' ] = '&amp;', [ '<' ] = '&lt;', [ '>' ] = '&gt;' } ) ) )
+  aRenderedFile:write( '\n<pre>\n' )
+
+  return aName, aRenderedName
+end
+
+local function RENDERWIKI( aContent, aType )
+  local aName = WRITECONTENT( aContent )
+  local aRenderedName = TMPNAME( 'part', 'html' )
+  local aCommand =
+        ( 'fossil test-wiki-render %s 2>/dev/null 1> %s' ):format
+        (
+          QUOTE( aName ),
+          QUOTE( aRenderedName )
+        )
+        assert( os.execute( aCommand ) )
+
+  return aName, aRenderedName
+end
+
+local function RENDERMARKDOWN( aContent, aType )
+  local aName = WRITECONTENT( aContent )
+  local aRenderedName = TMPNAME( 'part', 'html' )
+  local aCommand =
+        ( 'fossil test-markdown-render --safe %s 2>/dev/null 1> %s' ):format
+        (
+          QUOTE( aName ),
+          QUOTE( aRenderedName )
+        )
+        assert( os.execute( aCommand ) )
+
+  return aName, aRenderedName
+end
+
+local _renderers =
+{
+  [ 'text/plain' ] = RENDERPLAIN,
+  [ 'text/x-fossil-wiki' ] = RENDERWIKI,
+  [ 'text/x-markdown' ] = RENDERMARKDOWN
+}
+
+local function RENDER()
+  local aContent, aType = CONTENT()
+  local aRenderer = _renderers[ aType ]
+
+  return aRenderer( aContent, aType )
+end
+
+local function ESCAPE( aValue )
+  return ( aValue:gsub( '%p', '%%%1' ) )
+end
+
+local function RESOLVE( aBase, aRelative )
+  if '/' ~= aBase:sub( -1, -1 ) then aBase = ( '%s/' ):format( aBase ) end
+  if '/' == aRelative:sub( 1, 1 ) then aRelative = aRelative:sub( 2 ) end
+  local aCommand =
+[[
+tcucodec url -rs %s <<'EOF'
+%s
+EOF
+]]
+  aCommand = aCommand:format( QUOTE( aBase ), aRelative )
+  local aHandle = io.popen( aCommand, 'r' )
+  local aContent = aHandle:read()
+
+  aHandle:close()
+
+  if '' == aContent then aContent = nil end
+
+  return aContent or aBase
+end
+
+local function REWRITE( aRenderedName )
+  local aContent = io.open( aRenderedName, 'r' ):read( 'a' )
+  local aCommand = ( 'pup \'[href] json{}\' < %s | gron | grep \'.href = "\'' ):format( QUOTE( aRenderedName ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aBase = URL()[ 'canonical' ]
+  local didChange = false
+
+  for aLine in aHandle:lines() do
+    local aReference = aLine:match( '%"([^"]+)%"%;$' )
+
+
+    if aReference and not aReference:find( '^http(s)?://' ) then
+      local aRewrite = RESOLVE( aBase, aReference )
+
+      aContent = aContent:gsub( ESCAPE( ( '"%s"' ):format( aReference ) ), ( '"%s"' ):format( aRewrite:gsub( '%%', '%%%%' ) ) )
+
+      didChange = true
+    end
+  end
+
+  if aContent:find( '<blockquote>', 1, true ) then
+    aContent = aContent:gsub( '<blockquote>', '<blockquote style="background-color: rgba(65, 131, 196, 0.1); border-left: 3px solid #254769; padding: .1em 1em;">' )
+
+    didChange = true
+  end
+
+  if didChange then
+    local aName = TMPNAME( 'part.re', 'html' )
+    local aFile = assert( io.open( aName, 'wb' ) )
+
+    assert( aFile:write( aContent ) )
+    assert( aFile:close() )
+
+    return aName
+  end
+
+  return aRenderedName
+end
+
+local function PARTS()
+  local aContentName, aRenderedName = RENDER()
+
+  if aRenderedName then
+    local aRewriteName = REWRITE( aRenderedName )
+    local aPartName = TMPNAME( 'part', 'txt' )
+    local aCommand =
+          ( 'lynx -dump -assume_charset=utf-8 -display_charset=utf-8 -width=70 -nomargins %s 2>/dev/null | grep -v %s 1> %s' ):format
+          (
+            QUOTE( aRewriteName ),
+            QUOTE( _directory ), --fixme -> file:// -> RESOLVE
+            QUOTE( aPartName )
+          )
+    assert( os.execute( aCommand ) )
+
+    return aPartName, aRewriteName
+  end
+
+  return aContentName
+end
+
+local function BOUNDARY( aMod )
+  local anID = ID()
+  local aDate = ARTIFACT()[ 'D' ]
+  local aDate, aTime = aDate:match( '^([%d-]+)T([%d:]+)' )
+  local aTime = aTime:gsub( '%p', '' )
+  local aBuffer = { tostring( aMod ), '0xf05511' }
+  local anOffset = ( ( aMod - 1 ) * 8 )
+
+  aBuffer[ #aBuffer + 1 ] = anID:sub( 1 + anOffset, 8 + anOffset ):reverse()
+  aBuffer[ #aBuffer + 1 ] = ( '%x' ):format( aTime ):reverse()
+  aBuffer[ #aBuffer + 1 ] = '=_'
+
+  return table.concat( aBuffer ):upper()
+end
+
+local function BASE64( aPart )
+  local aCommand = ( 'base64 < %s | fold -b -w76 2>/dev/null' ):format( QUOTE( aPart ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aContent = assert( aHandle:read( 'a' ) )
+
+  assert( aHandle:close() )
+
+  return aContent
+end
+
+local function QPRINT( aPart )
+  local aCommand = ( 'qprint --encode %s 2>/dev/null | delcr' ):format( QUOTE( aPart ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aContent = assert( aHandle:read( 'a' ) )
+
+  assert( aHandle:close() )
+
+  return aContent
+end
+
+local function SIGNATURE()
+  local aCommand =
+[[
+qprint --encode <<'EOF' 2>/dev/null | delcr
+
+—
+{archivedat}
+EOF
+]]
+  aCommand = aCommand:gsub( '{archivedat}', ARCHIVEDAT():sub( 2, -2 ) )
+  local aHandle = assert( io.popen( aCommand, 'r' ) )
+  local aContent = assert( aHandle:read( 'a' ) )
+
+  assert( aHandle:close() )
+
+  return aContent
+end
+
+local function ALIASKEY( aKey )
+        assert( aKey )
+  local anID = ID()
+  local aPrefix = anID:sub( 1, 4 ):reverse()
+  local aSuffix = anID:sub( -4 ):reverse()
+  local aDate = ARTIFACT()[ 'D' ]
+  local aDate, aTime = aDate:match( '^([%d-]+)T([%d:]+)' )
+  local aTime = aTime:gsub( '%p', '' ):reverse()
+  local anAlias = ( '{@%s@%s@%x@%s@}' ):format( aPrefix, aKey, aTime, aSuffix ):upper()
+
+  return anAlias
+end
+
+local function ALIAS( aContent )
+  return ( assert( aContent ):gsub( '{(%l+)}', function( aKey ) return ALIASKEY( aKey ) end ) )
+end
+
+local function REPLACE( aContent, aKey, aValue )
+  assert( aContent )
+  assert( aKey )
+  assert( aValue )
+
+  aKey = ALIASKEY( aKey ):gsub( '%p', '%%%1' )
+  aValue = aValue:gsub( '%%', '%%%%' )
+  aContent = aContent:gsub( aKey, aValue )
+
+  return aContent
+end
+
+local function MESSAGE()
+  local aMessage =
+[[
+Return-Path: <>
+From: {from}
+To: {to}
+Date: {date}
+Subject: {subject}
+Message-Id: {messageid}
+In-Reply-To: {inreplyto}
+References: {references}
+Archived-At: {archivedat}
+List-Archive: {listarchive}
+List-Id: {listid}
+List-Post: NO
+Importance: low
+Precedence: list
+Mime-Version: 1.0
+Content-Type: multipart/mixed; boundary="{mixedboundary}"
+
+--{mixedboundary}
+Content-Type: multipart/alternative; boundary="{altboundary}"
+
+--{altboundary}
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+{plainpart}
+--{altboundary}
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+{htmlpart}
+--{altboundary}--
+
+--{mixedboundary}
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+Content-Disposition: inline
+
+{signature}
+--{mixedboundary}--
+]]
+
+  aMessage = ALIAS( aMessage )
+  aMessage = REPLACE( aMessage, 'archivedat', ARCHIVEDAT() )
+  aMessage = REPLACE( aMessage, 'date', DATE() )
+  aMessage = REPLACE( aMessage, 'from', FROM() )
+  aMessage = REPLACE( aMessage, 'inreplyto', INREPLYTO() or '' )
+  aMessage = REPLACE( aMessage, 'listarchive', LISTARCHIVE() )
+  aMessage = REPLACE( aMessage, 'listid', LISTID() )
+  aMessage = REPLACE( aMessage, 'messageid', MESSAGEID( ID() ) )
+  aMessage = REPLACE( aMessage, 'references', REFERENCES() or '' )
+  aMessage = REPLACE( aMessage, 'subject', SUBJECT() )
+  aMessage = REPLACE( aMessage, 'to', TO() )
+
+  aMessage = aMessage:gsub( 'In%-Reply%-To%: \n', '' )
+  aMessage = aMessage:gsub( 'References%: \n', '' )
+
+  aMessage = REPLACE( aMessage, 'mixedboundary', BOUNDARY( 1 ) )
+  aMessage = REPLACE( aMessage, 'altboundary', BOUNDARY( 2 ) )
+
+  local aPart, aRenderedPart = PARTS()
+
+  aMessage = REPLACE( aMessage, 'plainpart', QPRINT( aPart ) )
+  aMessage = REPLACE( aMessage, 'htmlpart', QPRINT( aRenderedPart ) )
+  aMessage = REPLACE( aMessage, 'signature', SIGNATURE() )
+
+  print( aMessage )
+end
+
+local function CLEANUP()
+  if not _directory then return end
+  assert( '.' ~= _directory )
+  assert( '..' ~= _directory )
+  assert( '~' ~= _directory )
+  assert( '/' ~= _directory )
+  local aCommand =
+        ( 'rm -r %s 2>/dev/null' ):format
+        (
+          QUOTE( _directory )
+        )
+
+  assert( os.execute( aCommand ) )
+end
+
+MESSAGE()
+CLEANUP()

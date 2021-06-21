@@ -1,0 +1,233 @@
+#!/usr/bin/env lua
+
+--
+-- repo2mbox
+-- converts fossil forum repository to message/rfc822 mailbox
+--
+
+--[[
+
+# fossil sql <<'EOF' 2>/dev/null 1> id.txt
+.bail on
+.headers off
+.mode tabs
+
+select    strftime( '%s', event.mtime ) as time,
+          blob.uuid as uuid
+from      event
+
+join      blob
+on        blob.rid = event.objid
+
+where     event.type = 'f'
+
+order by  event.mtime,
+          blob.uuid;
+
+.exit
+EOF
+
+# wc -l id.txt
+16423 id.txt
+
+# split -l 2053 id.txt
+
+# repo2mbox mbox/fossil - < xaa >> log.txt &
+
+]]--
+
+local arg = arg
+local assert = assert
+local coroutine = require( 'coroutine' )
+local io = require( 'io' )
+local math = require( 'math' )
+local os = require( 'os' )
+local print = print
+local table = require( 'table' )
+local tonumber = tonumber
+local tostring = tostring
+
+_ENV = nil
+
+local _path = nil
+
+local function PATH()
+  _path = _path or assert( arg[ 1 ] )
+
+  return assert( _path )
+end
+
+local function QUOTE( anArgument )
+  return ( "'%s'" ):format( tostring( anArgument or '' ):gsub( "'", "'\\''" ) )
+end
+
+local function GETTIME()
+  local aCommand = ( 'find -L %s -type f -name \'*.eml\'' ):format( QUOTE( PATH() ) )
+  local aHandle = assert( io.popen( aCommand ), 'r' )
+  local max = math.max
+  local maxTime = 0
+
+  for aLine in aHandle:lines() do
+    local aTime, aHash = aLine:match( '/(%w+)%.(%w+)%.eml$' )
+
+    aTime = assert( tonumber( aTime, 36 ) )
+
+    maxTime = max( maxTime, aTime )
+  end
+
+  assert( aHandle:close() )
+
+  return maxTime
+end
+
+local _time = nil
+
+local function TIME()
+  _time = assert( _time or GETTIME() )
+
+  return _time
+end
+
+local function READEVENTS()
+  return coroutine.wrap
+  (
+    function()
+      for aLine in io.stdin:lines() do
+        local aTime, anUUID = aLine:match( '^(%C+)\t(%C+)$' )
+
+        coroutine.yield( assert( tonumber( aTime ) ), assert( anUUID ) )
+      end
+    end
+  )
+end
+
+local function QUERYEVENTS()
+  local aCommand =
+[[
+fossil sql <<'EOF' 2>/dev/null
+.bail on
+.headers off
+.mode tabs
+
+select    strftime( '%%s', event.mtime ) as time,
+          blob.uuid as uuid
+from      event
+
+join      blob
+on        blob.rid = event.objid
+
+where     event.objid >=
+          (
+            select  coalesce( min( event.objid ), 0 ) as rid
+            from    event
+
+            where   event.mtime >= strftime( '%%J', %d, 'unixepoch' )
+            and     event.type = 'f'
+          )
+and       event.type = 'f'
+
+order by  event.mtime,
+          blob.uuid;
+
+.exit
+EOF
+]]
+  aCommand = aCommand:format( TIME() )
+
+  return coroutine.wrap
+  (
+    function()
+      local aHandle = assert( io.popen( aCommand, 'r' ) )
+
+      for aLine in aHandle:lines() do
+        local aTime, anUUID = aLine:match( '^(%C+)\t(%C+)$' )
+
+        coroutine.yield( assert( tonumber( aTime ) ), assert( anUUID ) )
+      end
+
+      assert( aHandle:close() )
+    end
+  )
+end
+
+local function EVENTS()
+  if '-' == arg[ 2 ] then return READEVENTS() end
+
+  return QUERYEVENTS()
+end
+
+local base =
+      {
+        '0', '1', '2', '3', '4', '5', '6', '7', '8',
+        '9', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
+        'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q',
+        'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'
+      }
+
+local function tobase( aNumber, aBase )
+  assert( aNumber, 'bad argument #1 to \'tobase\' (nil number)' )
+  assert( aBase and aBase >= 2 and aBase <= #base, 'bad argument #2 to \'tobase\' (base out of range)' )
+
+  local abs = math.abs
+  local floor = math.floor
+  local aNumber = floor( abs( tonumber( aNumber ) ) )
+  local aBuffer = {}
+
+  repeat
+    aBuffer[ #aBuffer + 1 ] = base[ ( aNumber % aBase ) + 1 ]
+    aNumber = floor( aNumber / aBase )
+  until aNumber == 0
+
+  return table.concat( aBuffer ):reverse()
+end
+
+local function NAME( aTime, anUUID )
+  return ( '%s.%s' ):format( tobase( aTime, 36 ), anUUID:sub( 1, 10 ) )
+end
+
+local function EXISTS( aFileName )
+  local aFile = io.open( aFileName, 'r' )
+
+  if aFile then aFile:close() return true end
+end
+
+local function GETLOCATION()
+  local aCommand = arg[ 0 ]
+  local anOffset = aCommand:reverse():find( '/', 1, true )
+
+  return aCommand:sub( 1, aCommand:len() - anOffset + 1 )
+end
+
+local _location = nil
+
+local function LOCATION()
+  _location = assert( _location or GETLOCATION() )
+
+  return _location
+end
+
+local function TOUCH( aFileName, aTime )
+  local aFormat = os.date ( '%Y%m%d%H%M', aTime )
+  local aCommand = ( 'touch -t %s %s 2>/dev/null' ):format( QUOTE( aFormat ), QUOTE( aFileName ) )
+
+  assert( os.execute( aCommand ) )
+end
+
+local function PROCESS( aTime, anUUID )
+  local aFileName = ( '%s/%s.eml' ):format( PATH(), NAME( aTime, anUUID ) )
+        if EXISTS( aFileName ) then return end
+  local aTmpName = ( '%s~' ):format( aFileName )
+  local aCommand = ( '%sart2eml %s 2>/dev/null 1> %s' ):format( LOCATION(), QUOTE( anUUID ), QUOTE( aTmpName ) )
+
+  print( aTime, anUUID, aFileName, os.date( '!%Y-%m-%dT%TZ' ) )
+
+  assert( os.execute( aCommand ) )
+  TOUCH( aTmpName, aTime )
+  assert( os.rename( aTmpName, aFileName ) )
+end
+
+for aTime, anUUID in EVENTS() do
+  PROCESS( aTime, anUUID )
+end
+
+
