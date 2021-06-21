@@ -1,5 +1,5 @@
 # FOS2POP
-[FOSSIL](https://en.wikipedia.org/wiki/Netcat "FOSSIL") TO [POP3](https://en.wikipedia.org/wiki/Post_Office_Protocol "POP3") GATEWAY
+[FOSSIL](https://fossil-scm.org/ "FOSSIL") TO [POP3](https://en.wikipedia.org/wiki/Post_Office_Protocol "POP3") GATEWAY
 
 ```bash
 # tree pop3 -d
