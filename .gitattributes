@@ -1,0 +1,8 @@
+2mbox linguist-documentation=false
+2mbox linguist-language=Lua
+art2eml linguist-documentation=false
+art2eml linguist-language=Lua
+pop3 linguist-documentation=false
+pop3 linguist-language=Lua
+repo2mbox linguist-documentation=false
+repo2mbox linguist-language=Lua
