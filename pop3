@@ -412,8 +412,7 @@ local function HANDLE()
         LOG()[ 'request' ] = aLine
   local aList = {}
         aLine:gsub( '(%S+)', function( aValue ) aList[ #aList + 1 ] = aValue end )
-  local aName = assert( aList[ 1 ] ):upper()
-        table.remove( aList, 1 )
+  local aName = assert( table.remove( aList, 1 ) ):upper()
   local aCommand = assert( _commands[ aName ] )
 
   aCommand( table.unpack( aList ) )
