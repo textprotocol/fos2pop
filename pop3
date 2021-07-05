@@ -97,7 +97,7 @@ end
 
 local function BUILDTOC()
   local aCommand =
-        ( "find -L %s -type f -name '*.eml' -printf '%%p\\t%%s\\n' 2>/dev/null | sort %s" ):format
+        ( "find -L %s -maxdepth 1 -type f -name '*.eml' -printf '%%f\\t%%s\\n' 2>/dev/null | sort %s" ):format
         ( QUOTE( DIRECTORY() ), LIMITCLAUSE() )
   local aHandle = assert( io.popen( aCommand, 'r' ) )
   local aFile = TMPFILE()
@@ -107,7 +107,7 @@ local function BUILDTOC()
 
   for aLine in aHandle:lines() do
     local aName, aSize = aLine:match( '^(%C+)\t(%C+)$' )
-          aName = assert( aName:match( '/([%w.]+)%.eml$' ) )
+          aName = assert( aName:match( '^([%w.]+)%.eml$' ) )
           aSize = assert( tonumber( aSize ) )
     local aDescription = ( '%s\t%d\n' ):format( aName, aSize )
 
