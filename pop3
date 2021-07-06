@@ -97,7 +97,7 @@ end
 
 local function BUILDTOC()
   local aCommand =
-        ( "find -L %s -maxdepth 1 -type f -name '*.eml' -printf '%%f\\t%%s\\n' 2>/dev/null | sort %s" ):format
+        ( "find -L %s -maxdepth 1 -name '*.eml' -printf '%%f\\t%%s\\n' 2>/dev/null | sort %s" ):format
         ( QUOTE( DIRECTORY() ), LIMITCLAUSE() )
   local aHandle = assert( io.popen( aCommand, 'r' ) )
   local aFile = TMPFILE()
@@ -432,5 +432,3 @@ local function MAIN()
 end
 
 MAIN()
-
-

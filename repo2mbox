@@ -62,7 +62,7 @@ local function QUOTE( anArgument )
 end
 
 local function GETTIME()
-  local aCommand = ( 'find -L %s -type f -name \'*.eml\'' ):format( QUOTE( PATH() ) )
+  local aCommand = ( "find -L %s -maxdepth 1 -name '*.eml'" ):format( QUOTE( PATH() ) )
   local aHandle = assert( io.popen( aCommand ), 'r' )
   local max = math.max
   local maxTime = 0
