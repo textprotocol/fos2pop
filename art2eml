@@ -249,6 +249,12 @@ local function REFERENCES()
   return table.concat( aBuffer, '\n ' )
 end
 
+local function SUPERSEDES()
+  local anID = ARTIFACT()[ 'P' ]
+
+  if anID then return MESSAGEID( anID ) end
+end
+
 local function SUBJECT()
   local anArtifact = ARTIFACT()
   local aSubject = anArtifact[ 'H' ]
@@ -554,6 +560,7 @@ Subject: {subject}
 Message-Id: {messageid}
 In-Reply-To: {inreplyto}
 References: {references}
+Supersedes: {supersedes}
 Archived-At: {archivedat}
 List-Archive: {listarchive}
 List-Id: {listid}
@@ -596,11 +603,13 @@ Content-Disposition: inline
   aMessage = REPLACE( aMessage, 'listid', LISTID() )
   aMessage = REPLACE( aMessage, 'messageid', MESSAGEID( ID() ) )
   aMessage = REPLACE( aMessage, 'references', REFERENCES() or '' )
+  aMessage = REPLACE( aMessage, 'supersedes', SUPERSEDES() or '' )
   aMessage = REPLACE( aMessage, 'subject', SUBJECT() )
   aMessage = REPLACE( aMessage, 'to', TO() )
 
   aMessage = aMessage:gsub( 'In%-Reply%-To%: \n', '' )
   aMessage = aMessage:gsub( 'References%: \n', '' )
+  aMessage = aMessage:gsub( 'Supersedes%: \n', '' )
 
   aMessage = REPLACE( aMessage, 'mixedboundary', BOUNDARY( 1 ) )
   aMessage = REPLACE( aMessage, 'altboundary', BOUNDARY( 2 ) )
